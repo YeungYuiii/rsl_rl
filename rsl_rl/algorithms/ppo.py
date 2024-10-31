@@ -78,8 +78,8 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
-        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
+    def init_storage(self, num_fields, num_wolfs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
+        self.storage = RolloutStorage(num_fields, num_wolfs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -103,10 +103,10 @@ class PPO:
     
     def process_env_step(self, rewards, dones, infos):
         self.transition.rewards = rewards.clone()
-        self.transition.dones = dones
+        self.transition.dones = dones.view(self.transition.rewards.shape)
         # Bootstrapping on time outs
         if 'time_outs' in infos:
-            self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+            self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(-1).to(self.device), -1)
 
         # Record the transition
         self.storage.add_transitions(self.transition)
