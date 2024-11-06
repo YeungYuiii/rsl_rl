@@ -34,17 +34,87 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 from torch.nn.modules import rnn
+import torch.nn.functional as F
+
+# Define the Attention mechanism
+class Attention(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(Attention, self).__init__()
+        self.query_layer = nn.Linear(input_dim, hidden_dim)
+        self.key_layer = nn.Linear(input_dim, hidden_dim)
+        self.value_layer = nn.Linear(input_dim, hidden_dim)
+        self.scale = torch.sqrt(torch.FloatTensor([hidden_dim])).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+    def forward(self, x):
+        # x: (batch_size, sequence_length, input_dim)
+        Q = self.query_layer(x)  # (batch_size, sequence_length, hidden_dim)
+        K = self.key_layer(x)    # (batch_size, sequence_length, hidden_dim)
+        V = self.value_layer(x)  # (batch_size, sequence_length, hidden_dim)
+
+        # Compute attention scores
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        attention_weights = F.softmax(attention_scores, dim=-1)  # (batch_size, sequence_length, sequence_length)
+
+        # Compute weighted sum of values
+        attention_output = torch.matmul(attention_weights, V)  # (batch_size, sequence_length, hidden_dim)
+        #return attention_output.mean(dim=1)  # Reduce to (batch_size, hidden_dim)
+        return attention_output
+
+# Multi-Head Attention mechanism
+class MultiHeadAttention(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_heads):
+        super(MultiHeadAttention, self).__init__()
+        assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+
+        # Linear layers for query, key, and value
+        self.query_layer = nn.Linear(input_dim, hidden_dim)
+        self.key_layer = nn.Linear(input_dim, hidden_dim)
+        self.value_layer = nn.Linear(input_dim, hidden_dim)
+        self.fc_out = nn.Linear(hidden_dim, hidden_dim)
+
+        self.scale = torch.sqrt(torch.FloatTensor([self.head_dim])).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        sequence_length = x.shape[1]
+
+        # Linear projections
+        Q = self.query_layer(x)  # (batch_size, sequence_length, hidden_dim)
+        K = self.key_layer(x)    # (batch_size, sequence_length, hidden_dim)
+        V = self.value_layer(x)  # (batch_size, sequence_length, hidden_dim)
+
+        # Split into multiple heads
+        Q = Q.view(batch_size, sequence_length, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        K = K.view(batch_size, sequence_length, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        V = V.view(batch_size, sequence_length, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        # Compute attention scores
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        attention_weights = F.softmax(attention_scores, dim=-1)
+
+        # Compute weighted sum of values
+        attention_output = torch.matmul(attention_weights, V)
+        attention_output = attention_output.permute(0, 2, 1, 3).contiguous()
+        attention_output = attention_output.view(batch_size, sequence_length, -1)
+
+        # Final linear projection
+        output = self.fc_out(attention_output)
+        return output
 
 class ActorCritic(nn.Module):
     is_recurrent = False
     def __init__(self,  num_actor_obs,
                         num_critic_obs,
                         num_actions,
+                        num_heads=4,
+                        attention_hidden_dim=32,
                         actor_hidden_dims=[256, 256, 256],
                         critic_hidden_dims=[256, 256, 256],
                         activation='elu',
                         init_noise_std=1.0,
-                        **kwargs):
+                        **kwargs):  
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
         super(ActorCritic, self).__init__()
@@ -56,6 +126,7 @@ class ActorCritic(nn.Module):
 
         # Policy
         actor_layers = []
+        # actor_layers.append(MultiHeadAttention(mlp_input_dim_a, attention_hidden_dim, num_heads))
         actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
         actor_layers.append(activation)
         for l in range(len(actor_hidden_dims)):
@@ -68,7 +139,8 @@ class ActorCritic(nn.Module):
 
         # Value function
         critic_layers = []
-        critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
+        critic_layers.append(MultiHeadAttention(mlp_input_dim_c, attention_hidden_dim, num_heads))
+        critic_layers.append(nn.Linear(attention_hidden_dim, critic_hidden_dims[0]))
         critic_layers.append(activation)
         for l in range(len(critic_hidden_dims)):
             if l == len(critic_hidden_dims) - 1:
@@ -118,6 +190,11 @@ class ActorCritic(nn.Module):
 
     def update_distribution(self, observations):
         mean = self.actor(observations)
+        # if torch.isnan(observations).any() or torch.isinf(observations).any():
+        #     print("NaN or Inf in observations")
+        #     nan_mask = torch.isnan(mean)
+        #     torch.save(nan_mask, 'nan_mask.pt')
+        #     raise ValueError("Invalid values detected in input observations")
         self.distribution = Normal(mean, mean*0. + self.std)
 
     def act(self, observations, **kwargs):
